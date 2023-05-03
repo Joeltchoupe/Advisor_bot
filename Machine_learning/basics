@@ -1,1 +1,12 @@
+Pour entraîner une intelligence artificielle, les responsables doivent passer par 3 stades : l’entraînement, la validation et le testing. Ce processus s’applique avec le Machine Learning et le Deep Learning. 
+
+Lors de la première étape, l’ordinateur doit se nourrir d’une énorme quantité d’informations. 
+Evidemment, la qualité de ces dernières est importante. Le but avec cette étape est d’apprendre à l’IA à décider et à prédire avec plus de précision. 
+
+La seconde étape est en quelque sorte un examen. Le calculateur doit passer par la validation de données pour déterminer si les informations qu’il avait reçues ont été triées convenablement.
+Si l’IA réussit le test, elle passe à l’étape suivante. Sinon, elle revient à la case de départ pour un ajustement de ses défauts.
+
+La dernière étape consiste à tester la machine avec des données qui lui sont encore nouvelles. Pour être plus précis, il s’agit
+d’une évaluation de son efficacité dans des conditions réelles (traduction de texte inconnu). Si l’IA réussit l’épreuve, cela veut dire qu’elle est opérationnelle. Sinon, elle recommence le processus depuis le début.
+
 
