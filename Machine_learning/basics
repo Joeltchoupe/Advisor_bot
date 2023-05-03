@@ -10,3 +10,4 @@ La dernière étape consiste à tester la machine avec des données qui lui sont
 d’une évaluation de son efficacité dans des conditions réelles (traduction de texte inconnu). Si l’IA réussit l’épreuve, cela veut dire qu’elle est opérationnelle. Sinon, elle recommence le processus depuis le début.
 
 
+TENSORFLOW, SPACY
