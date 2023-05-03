@@ -1,0 +1,111 @@
+SpaCy : comment l'utiliser sous Python?
+Aujourd'hui, les données textuelles non structurées sont produites à grande échelle et représentent une source de données valorisables à condition de savoir les exploiter. Il est important de les traiter et d’en tirer des conclusions. Pour ce faire, les données doivent être représentées dans un format qui peut être compris par les ordinateurs. spaCy peut nous aider à le faire.
+
+spaCy est une bibliothèque open-source pour le traitement avancé du langage naturel (NLP) en Python. Elle est conçue spécifiquement pour une utilisation en production et permet de construire des applications qui traitent et "comprennent" de grands volumes de texte. Elle peut être utilisée pour construire des systèmes d’extraction d’information ou de compréhension du langage naturel, ou pour pré-traiter le texte pour l’apprentissage profond.
+
+Dans cet article, nous allons voir comment utiliser la bibliothèque spaCy pour traiter des séquences de texte. Nous allons également énumérer ses avantages et ses alternatifs.
+
+spaCy : qu’est-ce que c’est ?
+SpaCy est une bibliothèque Python open source pour le traitement du texte et des langues naturelles. Elle est conçue pour développer des applications NLP avancées rapidement et pour résoudre de nombreuses tâches NLP avec la vitesse, la précision et la performance de pointe.
+
+Créé par l’équipe de la startup Explosion AI, spaCy a été publiée sous la licence MIT en 2015 et ses principaux développeurs sont Matthew Honnibal et Ines Montani, les fondateurs de la startup.
+
+Contrairement à NLTK, qui est largement utilisé pour l’enseignement et la recherche, spaCy est conçu pour l’utilisation de production en prenant en charge les modèles personnalisés de PyTorch et TensorFlow ou MXNet par le biais de sa propre bibliothèque d’apprentissage automatique Thinc.
+
+Logo spaCy
+La bibliothèque spaCy présente de multiples avantages. En voici quelques-uns :
+
+spaCy offre une excellente performance et une précision extrêmement élevées pour le traitement du langage naturel, y compris pour de grandes quantités de texte.
+Il est facile à utiliser et à apprendre, ce qui le rend idéal pour les développeurs qui débutent dans le domaine du traitement du langage naturel.
+Il prend en charge de diverses langues, y compris le français, l'allemand, l'espagnol, le portugais, le russe et le chinois et fournit une grande variété de fonctionnalités, notamment l’analyse de sentiments, l’analyse de relations, l’identification de noms, l’analyse d'entités nommées et bien plus encore.
+Il fournit une API riche et flexible qui permet aux développeurs de créer des applications de traitement du langage naturel personnalisées.
+spaCy est open source et disponible gratuitement sous la licence MIT.
+Traitement des textes avec spaCy
+Avant de commencer à produire du code pour le processing de texte, il y a tout d'abord quelques étapes à réaliser. Commençons par importer la librairie spaCy et le pipeline pré-entraine disponibles pour le français fr_core_news_sm.
+
+import spacy
+nlp = spacy.load("fr_core_news_sm")
+# En local, il faut d'abord télécharger le modèle fr_core_news_sm avec la commande suivant (à faire une seule fois)
+# !python -m spacy download fr_core_news_sm
+doc = nlp("la portée du signal est très faible.")
+Tokenisation
+La tokenisation cherche à transformer un texte en une série de tokens individuels tels que chaque token représente un mot ou une ponctuation. Identifier des tokens semble être une tâche facile qui relève à simplement séparer les mots selon les espaces. Mais puisqu'en français, il existe des cas particuliers tels que les mots : C'est. Il faut que le modèle de tokenisation sépare le C’ comme étant un premier mot et considéré est comme un deuxième.
+
+Lorsque l'on itère sur un Document spaCy, cela retourne chaque token dans l'ordre. La variable nlp est le point d’entrée vers toutes les fonctionnalités de SpaCy. Elle permet de représenter le texte sous une forme interprétable par la librairie. Du coup, on peut accéder aux tokens de notre texte de cette manière :
+
+tokens=[]
+for token in doc:
+	tokens.append(token.text)
+tokens
+['Je', 'suis', 'allé', 'au', 'marché', "aujourd'hui", 'et', "j'", 'ai', 'acheté', 'des', 'pommes', 'et', 'des', 'poires', '.']
+Lemmatisation
+Les textes souvent peuvent contenir différentes formes d’un mot comme lecteur, lecteurs, lecture. Aussi, parfois, nous avons des mots liés avec une signification similaire, comme la nation, la nationalité et nationale.
+
+Le but de la lemmatisation est de réduire les formes infractionnelles et parfois les formes dérivées d’un mot à une forme de base commune et ainsi réduire la taille du vocabulaire et faciliter les taches du NLP tels que l'étude des relations entre les mots et la modélisation de sujets.
+
+La propriété lemma_ permet d'accéder au lemme de chaque mot, utile notamment si l'on souhaite faire de la lemmatisation.
+
+for token in doc:
+	print((token.text, token.lemma_))
+('Je', 'je') ('suis', 'être') ('allé', 'aller') ('au', 'au') ('marché', 'marché') ("aujourd'hui", "aujourd'hui") ('et', 'et') ("j'", 'je') ('ai', 'avoir') ('acheté', 'acheter') ('des', 'un') ('pommes', 'pomme') ('et', 'et') ('des', 'de') ('poires', 'poire') ('.', '.')
+PoS Tagging
+Le Part-of-Speech Tagging ou l'étiquetage grammatical en français essaye d’attribuer une étiquette à chaque mot d’une phrase représentant la classe grammaticale d’un mot (nom propre, adjectif, déterminant, etc). Le modèle est capable de construire un graphe définissant la relation entre tous les mots, ce qui permet donc d'en déduire le Part-of-Speech.
+
+Nous pouvons afficher les propriétés associées pour chacun des tokens notamment le contenu et le Part-of-Speech lorsque l'on itère sur un Document spaCy,
+
+doc = nlp("la portée du signal est très faible.")
+for token in doc: # Pour chaque token
+	print((token.text, token.pos_)) # On affiche le contenu et le Part-of-Speech
+('la', 'DET') ('portée', 'NOUN') ('du', 'ADP') ('signal', 'NOUN') ('est', 'AUX') ('très', 'ADV') ('faible', 'ADJ') ('.', 'PUNCT')
+Stop words
+Les stop words sont un ensemble de mots couramment utilisés dans n’importe quelle langue. Par exemple, en français, les mots le , est et pour seraient facilement qualifiés comme stop words. Ces mots, bien souvent, n’apportent pas d’information. Pour certaines applications du NLP, on souhaite limiter la quantité de mots dans les données d’entraînement afin de permettre aux modèles de se concentrer que sur les mots importants à la tâche. Ils sont alors utilisés pour éliminer les mots sans importance.
+
+Les stop words sont établis comme des listes de mots. Ces listes sont généralement disponibles dans toutes les librairies comme spaCy et dans beaucoup de langues différentes.
+
+On accède aux listes en français sous spaCy de cette manière :
+
+from spacy.lang.fr.stop_words import STOP_WORDS as fr_stop
+# la liste fr-stop contient les stop words en français
+fr_stop
+{'a', 'abord', 'afin', 'ah', 'ai', 'aie', 'ainsi', 'ait', 'allaient', 'allons', 'alors', 'anterieur', 'anterieure', 'anterieures', 'antérieur', 'antérieure', 'antérieures', 'apres', 'après', 'as', 'assez', 'attendu',...,vos', 'votre', 'votres', 'vous', 'vous-mêmes', 'vu', 'vé', 'vôtre', 'vôtres', 'y', 'à', 'â', 'ça', 'ès', 'également', 'étaient', 'étais', 'était', 'étant', 'être', 'ô'}
+On essaye maintenant d'éliminer les stop words de notre phrase :
+
+clean_words = []
+for token in tokens:
+	if token not  in stopwords:
+		clean_words.append(token)
+clean_words
+['Je', 'allé', 'marché', "aujourd'hui", 'acheté', 'pommes', 'poires', '.']
+Word Embedding
+Le Word Embedding (ou plongement lexical en français) est une méthode d'encodage qui vise à représenter les mots ou les phrases d’un texte par des vecteurs de nombres réels, décrit dans un modèle vectoriel (ou Vector Space Model).
+
+D'une manière plus simple, chaque mot du vocabulaire V étudié sera représenté par un vecteur de taille m. Le principe du Word Embedding est de projeter chacun de ces mots dans un espace vectoriel d'une taille fixe N (N étant différent de m). C'est-à-dire, quelle que soit la taille du vocabulaire, on devra être capable de projeter un mot dans son espace.
+
+Cela sous spaCy se fait automatiquement par accès à la propriété des tokens vector :
+
+import numpy as np
+def return_word_embedding(sentence):
+    # Tokeniser la phrase
+    doc = nlp(sentence)
+    # Retourner le vecteur lié à chaque token
+    return [(X.vector) for X in doc]
+# Affficher le vecteur du premier token 
+return_word_embedding(doc)[0]
+array([-3.2955274e-01, -1.0629039e+00, -2.2743833e-01, 2.6912940e+00, 5.0620466e-01, -7.4673033e-01, 7.5613904e-01, 7.1751289e+00, 1.4741902e+00, 7.5114465e-01, -2.8416042e+00, -1.6305225e+00, 9.1016066e-01, -2.4141111e+00, 1.1900433e+00, -2.6625166e+00, -1.9849457e+00, -6.2191719e-01, -1.2616880e+00, -3.5980186e-01, -1.1837255e+00, 1.9277593e-01, -2.2405076e+00, -3.1143935e+00, 3.8593051e+00, -5.5906105e+00, -3.3423831e+00, 4.1731662e-01, -3.3807702e+00, 2.0427086e+00, -2.0548613e+00, 8.4581769e-01, 3.8734930e+00, 2.7577620e+00, 2.3247225e+00, 9.9957161e+00, -2.4787219e+00, 4.9691467e+00, -1.3034940e-03, -3.7770984e+00, -4.8707547e+00, 3.0887012e+00, -1.6422390e+00, -1.2009645e+00, -1.6605878e+00, -3.9882660e-01, -6.1024678e-01, -1.2738353e+00, 2.7376204e+00, -1.6568935e+00, 4.7964554e+00, 3.5767758e-01, -2.6294925e+00, -1.7334583e+00, -3.0816033e+00, -2.4368010e+00, -1.5317788e+00, -3.2215657e+00, 7.1333629e-01, 2.3125489e+00, -1.0755599e+00, -5.6672287e-01, 4.2270513e+00, -3.9849033e+00, 1.0295213e+00, -1.4136431e+00, 2.6644607e+00, 2.7722836e-02, 8.4837437e+00, -5.8946328e+00, 5.6799231e+00, -2.1214108e+00, -1.2854609e+00, -1.6625056e-01, -6.6657907e-01, -4.6081724e+00, -3.6171827e+00, -2.8939149e+00, -4.4216356e+00, 7.3144078e-02, 3.3247855e+00, 5.5061617e+00, 3.9192114e+00, 2.2859590e+00, 3.3988054e+00, -4.8542178e-01, 4.0024729e+00, 1.9830213e+00, 2.0712652e+00, -1.7888064e+00, 1.2461224e+00, -9.0536797e-01, 2.4134171e+00, 1.9713154e+00, -7.2191010e+00, 4.5442659e-01], dtype=float32)
+Le résultat affiché est le vecteur représentant le premier mot de notre liste de tokens.
+
+Les limitations et les alternatives de spaCy
+spaCy est une bibliothèque open source pour le traitement du langage naturelqui offre une excellente prise en charge de l'unicode et une bonne vitesse de traitement. Cependant, il y a quelques limitations :
+
+spaCy ne prend pas en charge les langues qui ne sont pas couramment parlées.
+spaCy est une bibliothèque de NLP en cours de développement et certaines fonctionnalités ne sont pas encore disponibles. Par exemple, il n'y a pas de séquence d'apprentissage incorporée pour aider à apprendre les modèles et qu'il n'y a pas de bibliothèque d'entraînement ou d'évaluation des performances des modèles.
+Il n'est pas possible d'appliquer spaCy à certaines tâches linguistiques. Par exemple, il ne peut pas être utilisé pour la traduction automatique, car cela nécessite une compréhension beaucoup plus approfondie du langage.
+spaCy peut également ne pas fonctionner correctement pour certains mots ou groupes de mots, parce qu'il existe de nombreuses façons de les utiliser. Par exemple, les pronoms peuvent avoir des sens différents en fonction du contexte, ce que spaCy ne peut pas toujours détecter.
+Cependant, spaCy rivalise avec une foule d’autres bibliothèques du NLP. NLTK, TextBlob et Gensim sont trois outils principaux qui répondent à bon nombre des mêmes besoins :
+
+NLTK : NLTK est une bibliothèque très populaire pour le traitement du langage naturel (NLP) en Python. Il est largement utilisé dans les universités et la recherche contrairement à spaCy qui est plutôt conçu pour la production. NLTK est très facile à apprendre et à utiliser. Il a beaucoup de fonctionnalités. Cependant, NLTK peut être lent et intensif a la mémoire. spaCy est beaucoup plus rapide et efficace que NLTK. Il est aussi plus simple à utiliser. Néanmoins, il n’a pas autant de fonctionnalités que NLTK.
+TextBlob : est alimenté par NLTK. Il est le mieux utilisé pour des tâches telles que l’analyse des sentiments et la classification du texte. spaCy est mieux utilisé pour des tâches telles que la reconnaissance d’entités nommées et l’étiquetage d’une partie de la parole. spaCy est une bibliothèque plus récente que textblob. Elle est aussi beaucoup plus rapide mais pas aussi précise que TextBlob.
+Gensim : est une bibliothèque Python pour la modélisation de sujets (topic Modeling), l’indexation de documents et la recherche de similitudes avec de grands corpus. Ce n'est pas le cas pour spaCy. Gensim est plus rapide et plus facile à utiliser, tandis que spaCy est plus précis. spaCy nécessite plus de mémoire que Gensim.
+En bref, spaCy est non seulement une bibliothèque libre pour le traitement avancé du langage naturel (NLP) en Python, mais aussi une communauté de développeurs, d’ingénieurs, de chercheurs et d’éducateurs qui travaillent ensemble pour faire de spaCy le meilleur possible.
+
+Si vous cherchez une bibliothèque NLP puissante et efficace, spaCy est une excellente option.
