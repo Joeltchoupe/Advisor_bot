@@ -293,3 +293,101 @@ create table agent_runs (
 
 create index agent_runs_company
     on agent_runs(company_id, agent, started_at desc);
+
+
+
+
+-- À ajouter dans database/schema.sql
+
+create table forecasts (
+    company_id      uuid primary key references companies(id),
+    agent           text default 'revenue_velocity',
+    computed_at     timestamptz,
+    forecast_30d    numeric default 0,
+    forecast_60d    numeric default 0,
+    forecast_90d    numeric default 0,
+    revenue_velocity numeric default 0,
+    confidence      numeric default 0
+);
+
+create table cash_forecasts (
+    company_id          uuid primary key references companies(id),
+    base_30d            numeric default 0,
+    base_60d            numeric default 0,
+    base_90d            numeric default 0,
+    stress_30d          numeric default 0,
+    upside_30d          numeric default 0,
+    monthly_burn        numeric default 0,
+    runway_months       numeric default 0,
+    days_until_critical integer,
+    critical_threshold  numeric default 0,
+    computed_at         timestamptz default now()
+);
+
+create table win_loss_analyses (
+    id          uuid primary key default uuid_generate_v4(),
+    company_id  uuid not null references companies(id),
+    deal_id     text not null,
+    deal_title  text,
+    outcome     text,
+    total_days  integer,
+    avg_won_days numeric,
+    analysis    text,
+    analyzed_at timestamptz default now()
+);
+
+create table process_metrics (
+    company_id              uuid primary key references companies(id),
+    computed_at             timestamptz,
+    avg_cycle_time_days     numeric default 0,
+    active_tasks_count      integer default 0,
+    overdue_tasks_count     integer default 0,
+    unassigned_tasks_count  integer default 0
+);
+
+create table cac_metrics (
+    company_id              uuid primary key references companies(id),
+    blended_cac             numeric default 0,
+    total_clients           integer default 0,
+    total_marketing_spend   numeric default 0,
+    cac_by_source           jsonb default '{}',
+    clients_by_source       jsonb default '{}',
+    revenue_by_source       jsonb default '{}',
+    top_source              text default '',
+    period_days             integer default 90,
+    computed_at             timestamptz default now()
+);
+
+create table invoice_reminders (
+    id              uuid primary key default uuid_generate_v4(),
+    company_id      uuid not null references companies(id),
+    invoice_id      text not null,
+    reminder_number integer,
+    sent_at         timestamptz default now()
+);
+
+create table task_reminders (
+    id              uuid primary key default uuid_generate_v4(),
+    company_id      uuid not null references companies(id),
+    task_id         text not null,
+    reminder_type   text,
+    sent_at         timestamptz default now()
+);
+
+create table team_members (
+    id              uuid primary key default uuid_generate_v4(),
+    company_id      uuid not null references companies(id),
+    name            text not null,
+    email           text not null,
+    role            text default '',
+    crm_owner_id    text default '',
+    tool_user_id    text default ''
+);
+
+create table credentials (
+    id          uuid primary key default uuid_generate_v4(),
+    company_id  uuid not null references companies(id),
+    tool        text not null,
+    credentials jsonb not null,
+    unique (company_id, tool)
+);
