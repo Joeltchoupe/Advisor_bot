@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 
 PIPEDRIVE_BASE_URL = "https://api.pipedrive.com/v1"
 
+# Pipedrive OAuth : tokens valides 1 heure
+PIPEDRIVE_TOKEN_LIFETIME_SECONDS = 3600
+PIPEDRIVE_TOKEN_URL = "https://oauth.pipedrive.com/oauth/token"
+
 
 class PipedriveConnector(BaseConnector):
 
@@ -18,32 +22,127 @@ class PipedriveConnector(BaseConnector):
         return "pipedrive"
 
     def _base_params(self) -> dict:
-        # Pipedrive utilise une API key en query param
-        return {"api_token": self.credentials["api_token"]}
+        # Pipedrive supporte API key ET OAuth
+        # Si access_token présent → OAuth
+        # Sinon → api_token
+        if self.credentials.get("access_token"):
+            return {}    # Auth via header
+        return {"api_token": self.credentials.get("api_token", "")}
+
+    def _get_headers(self) -> dict:
+        if self.credentials.get("access_token"):
+            return {
+                "Authorization": f"Bearer {self.credentials['access_token']}"
+            }
+        return {}
+
+    # ─────────────────────────────────────────
+    # TOKEN REFRESH (OAuth uniquement)
+    # ─────────────────────────────────────────
+
+    def refresh_access_token(self) -> bool:
+        """
+        Pipedrive OAuth2 refresh.
+        Uniquement si on utilise OAuth (pas api_token).
+        """
+        refresh_token = self.credentials.get("refresh_token")
+        client_id     = self.credentials.get("client_id")
+        client_secret = self.credentials.get("client_secret")
+
+        if not all([refresh_token, client_id, client_secret]):
+            # Probablement en mode api_token → pas de refresh nécessaire
+            return True
+
+        try:
+            import base64
+            auth = base64.b64encode(
+                f"{client_id}:{client_secret}".encode()
+            ).decode()
+
+            response = requests.post(
+                PIPEDRIVE_TOKEN_URL,
+                data={
+                    "grant_type":    "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+                headers={
+                    "Authorization": f"Basic {auth}",
+                    "Content-Type":  "application/x-www-form-urlencoded"
+                },
+                timeout=15
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            from datetime import timezone, timedelta
+            expires_in = data.get(
+                "expires_in", PIPEDRIVE_TOKEN_LIFETIME_SECONDS
+            )
+            expires_at = (
+                datetime.now(tz=timezone.utc) +
+                timedelta(seconds=expires_in)
+            ).isoformat()
+
+            new_credentials = {
+                **self.credentials,
+                "access_token":  data["access_token"],
+                "refresh_token": data.get("refresh_token", refresh_token),
+                "expires_at":    expires_at
+            }
+
+            self._save_refreshed_credentials(new_credentials)
+            return True
+
+        except requests.RequestException as e:
+            logger.error(f"[pipedrive] Erreur refresh token : {e}")
+            return False
+
+    # ─────────────────────────────────────────
+    # CONNEXION
+    # ─────────────────────────────────────────
 
     def connect(self) -> bool:
         try:
             response = requests.get(
                 f"{PIPEDRIVE_BASE_URL}/users/me",
                 params=self._base_params(),
+                headers=self._get_headers(),
                 timeout=10
             )
-            return response.status_code == 200
+            if response.status_code == 200:
+                return True
+
+            if response.status_code == 401:
+                if self.refresh_access_token():
+                    response2 = requests.get(
+                        f"{PIPEDRIVE_BASE_URL}/users/me",
+                        params=self._base_params(),
+                        headers=self._get_headers(),
+                        timeout=10
+                    )
+                    return response2.status_code == 200
+
+            return False
+
         except requests.RequestException as e:
             logger.error(f"Pipedrive connexion : {e}")
             return False
 
     # ─────────────────────────────────────────
-    # DEALS
+    # FETCH DEALS
     # ─────────────────────────────────────────
 
     def fetch_deals(self) -> list[Deal]:
+        if not self.ensure_valid_token():
+            return []
+
         raw_deals = self._fetch_all_deals()
         deals = []
         for raw in raw_deals:
             deal = self._normalize_deal(raw)
             if deal:
                 deals.append(deal)
+
         logger.info(f"Pipedrive : {len(deals)} deals")
         return deals
 
@@ -56,23 +155,38 @@ class PipedriveConnector(BaseConnector):
             try:
                 params = {
                     **self._base_params(),
-                    "start": start,
-                    "limit": limit,
+                    "start":  start,
+                    "limit":  limit,
                     "status": "all_not_deleted"
                 }
                 response = requests.get(
                     f"{PIPEDRIVE_BASE_URL}/deals",
                     params=params,
+                    headers=self._get_headers(),
                     timeout=30
                 )
+
+                if response.status_code == 401:
+                    if self.refresh_access_token():
+                        response = requests.get(
+                            f"{PIPEDRIVE_BASE_URL}/deals",
+                            params=params,
+                            headers=self._get_headers(),
+                            timeout=30
+                        )
+                    else:
+                        break
+
                 response.raise_for_status()
                 data = response.json()
 
                 results = data.get("data") or []
                 all_deals.extend(results)
 
-                # Pagination Pipedrive
-                pagination = data.get("additional_data", {}).get("pagination", {})
+                pagination = data.get(
+                    "additional_data", {}
+                ).get("pagination", {})
+
                 if not pagination.get("more_items_in_collection"):
                     break
                 start += limit
@@ -89,7 +203,6 @@ class PipedriveConnector(BaseConnector):
             if not raw_id:
                 return None
 
-            # Statut Pipedrive : "open", "won", "lost"
             pd_status = raw.get("status", "open")
             if pd_status == "won":
                 status = DealStatus.WON
@@ -98,19 +211,15 @@ class PipedriveConnector(BaseConnector):
             else:
                 status = DealStatus.ACTIVE
 
-            # Dernière activité
-            last_activity = self._parse_pd_date(
+            last_activity = self._parse_datetime(
                 raw.get("last_activity_date") or
                 raw.get("update_time")
             )
 
-            # Owner : Pipedrive retourne un objet
-            owner = raw.get("user_id") or {}
-            owner_id = str(owner.get("id", "")) if isinstance(owner, dict) else ""
+            owner      = raw.get("user_id") or {}
+            owner_id   = str(owner.get("id", "")) if isinstance(owner, dict) else ""
             owner_name = owner.get("name", "") if isinstance(owner, dict) else ""
-
-            # Source : via le channel custom ou le champ label
-            source = self._safe_str(raw.get("label"))
+            source     = self._safe_str(raw.get("label"))
 
             return Deal(
                 id=f"pipedrive_{raw_id}",
@@ -120,12 +229,18 @@ class PipedriveConnector(BaseConnector):
                 currency=self._safe_str(raw.get("currency"), "EUR"),
                 stage=self._safe_str(raw.get("stage_id")),
                 stage_order=self._safe_int(raw.get("stage_order_nr")),
-                probability=self._safe_float(raw.get("probability", 0)) / 100,
+                probability=self._safe_float(
+                    raw.get("probability", 0)
+                ) / 100,
                 status=status,
-                created_at=self._parse_pd_date(raw.get("add_time")) or datetime.utcnow(),
+                created_at=self._parse_datetime(
+                    raw.get("add_time")
+                ) or datetime.utcnow(),
                 last_activity_at=last_activity,
-                closed_at=self._parse_pd_date(raw.get("close_time")),
-                expected_close_date=self._parse_pd_date(raw.get("expected_close_date")),
+                closed_at=self._parse_datetime(raw.get("close_time")),
+                expected_close_date=self._parse_datetime(
+                    raw.get("expected_close_date")
+                ),
                 owner_id=owner_id,
                 owner_name=owner_name,
                 source=source,
@@ -134,23 +249,15 @@ class PipedriveConnector(BaseConnector):
             )
 
         except Exception as e:
-            logger.error(f"Pipedrive normalize_deal {raw.get('id')} : {e}")
+            logger.error(
+                f"Pipedrive normalize_deal {raw.get('id')} : {e}"
+            )
             return None
 
-    # ─────────────────────────────────────────
-    # CONTACTS
-    # ─────────────────────────────────────────
-
     def fetch_contacts(self) -> list[Contact]:
-        raw_contacts = self._fetch_all_contacts()
-        contacts = []
-        for raw in raw_contacts:
-            contact = self._normalize_contact(raw)
-            if contact:
-                contacts.append(contact)
-        return contacts
+        if not self.ensure_valid_token():
+            return []
 
-    def _fetch_all_contacts(self) -> list[dict]:
         all_contacts = []
         start = 0
 
@@ -164,15 +271,32 @@ class PipedriveConnector(BaseConnector):
                 response = requests.get(
                     f"{PIPEDRIVE_BASE_URL}/persons",
                     params=params,
+                    headers=self._get_headers(),
                     timeout=30
                 )
+
+                if response.status_code == 401:
+                    if self.refresh_access_token():
+                        response = requests.get(
+                            f"{PIPEDRIVE_BASE_URL}/persons",
+                            params=params,
+                            headers=self._get_headers(),
+                            timeout=30
+                        )
+                    else:
+                        break
+
                 response.raise_for_status()
                 data = response.json()
 
-                results = data.get("data") or []
-                all_contacts.extend(results)
+                for raw in (data.get("data") or []):
+                    contact = self._normalize_contact(raw)
+                    if contact:
+                        all_contacts.append(contact)
 
-                pagination = data.get("additional_data", {}).get("pagination", {})
+                pagination = data.get(
+                    "additional_data", {}
+                ).get("pagination", {})
                 if not pagination.get("more_items_in_collection"):
                     break
                 start += 100
@@ -189,16 +313,14 @@ class PipedriveConnector(BaseConnector):
             if not raw_id:
                 return None
 
-            # Email : Pipedrive retourne une liste
             emails = raw.get("email", [])
-            email = ""
+            email  = ""
             if isinstance(emails, list) and emails:
                 email = emails[0].get("value", "")
             if not email:
                 return None
 
-            # Organisation
-            org = raw.get("org_id") or {}
+            org          = raw.get("org_id") or {}
             company_name = org.get("name", "") if isinstance(org, dict) else ""
 
             return Contact(
@@ -208,7 +330,9 @@ class PipedriveConnector(BaseConnector):
                 first_name=self._safe_str(raw.get("first_name")),
                 last_name=self._safe_str(raw.get("last_name")),
                 company_name=company_name,
-                created_at=self._parse_pd_date(raw.get("add_time")) or datetime.utcnow(),
+                created_at=self._parse_datetime(
+                    raw.get("add_time")
+                ) or datetime.utcnow(),
                 connector_source="pipedrive",
                 raw_id=raw_id
             )
@@ -217,15 +341,14 @@ class PipedriveConnector(BaseConnector):
             logger.error(f"Pipedrive normalize_contact : {e}")
             return None
 
-    # ─────────────────────────────────────────
-    # ÉCRITURE
-    # ─────────────────────────────────────────
-
     def update_deal(self, raw_id: str, fields: dict) -> bool:
+        if not self.ensure_valid_token():
+            return False
         try:
             response = requests.put(
                 f"{PIPEDRIVE_BASE_URL}/deals/{raw_id}",
                 params=self._base_params(),
+                headers=self._get_headers(),
                 json=fields,
                 timeout=10
             )
@@ -236,14 +359,14 @@ class PipedriveConnector(BaseConnector):
             return False
 
     def add_note(self, deal_raw_id: str, note: str) -> bool:
+        if not self.ensure_valid_token():
+            return False
         try:
             response = requests.post(
                 f"{PIPEDRIVE_BASE_URL}/notes",
                 params=self._base_params(),
-                json={
-                    "content": note,
-                    "deal_id": int(deal_raw_id)
-                },
+                headers=self._get_headers(),
+                json={"content": note, "deal_id": int(deal_raw_id)},
                 timeout=10
             )
             response.raise_for_status()
@@ -251,22 +374,3 @@ class PipedriveConnector(BaseConnector):
         except requests.RequestException as e:
             logger.error(f"Pipedrive add_note : {e}")
             return False
-
-    # ─────────────────────────────────────────
-    # UTILITAIRES PIPEDRIVE
-    # ─────────────────────────────────────────
-
-    def _parse_pd_date(self, value) -> Optional[datetime]:
-        """
-        Pipedrive retourne les dates en :
-        - "2025-03-15 10:30:00" (datetime string)
-        - "2025-03-15" (date string)
-        """
-        if not value:
-            return None
-        try:
-            if len(str(value)) == 10:
-                return datetime.strptime(str(value), "%Y-%m-%d")
-            return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
-        except (ValueError, TypeError):
-            return None
