@@ -4,22 +4,21 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+
+from api.dependencies import verify_api_key, assert_company_access
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────
-# VUE D'ENSEMBLE (page principale)
-# ─────────────────────────────────────────
-
 @router.get("/overview/{company_id}")
-def get_overview(company_id: str) -> dict:
-    """
-    Toutes les données pour la page principale du dashboard.
-    Un seul appel API pour charger la page entière.
-    """
+def get_overview(
+    company_id: str,
+    auth_company_id: str = Depends(verify_api_key),
+) -> dict:
+    assert_company_access(company_id, auth_company_id)
+
     from services.database import get_client
     from orchestrator.profile import get_company_profile
 
@@ -28,28 +27,18 @@ def get_overview(company_id: str) -> dict:
         profile = get_company_profile(company_id)
 
         if not profile:
-            raise HTTPException(
-                status_code=404,
-                detail="Client introuvable"
-            )
+            raise HTTPException(status_code=404, detail="Client introuvable")
 
-        # ── Score de Clarté ──
         clarity_score = profile.get("clarity_score", 0)
-
-        # ── KPIs des agents ──
         kpis = _get_latest_kpis(client, company_id)
-
-        # ── Alertes actives ──
         alerts = _get_active_alerts(client, company_id)
 
-        # ── Actions en attente ──
         pending = client.table("pending_actions").select(
             "id, action_type, description, agent, created_at"
         ).eq("company_id", company_id).eq(
             "status", "pending"
         ).order("created_at", desc=True).execute()
 
-        # ── Historique des runs ──
         recent_runs = client.table("agent_runs").select(
             "agent, kpi_name, kpi_value, started_at, success"
         ).eq("company_id", company_id).order(
@@ -72,29 +61,23 @@ def get_overview(company_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ─────────────────────────────────────────
-# PIPELINE (Revenue Velocity)
-# ─────────────────────────────────────────
-
 @router.get("/pipeline/{company_id}")
-def get_pipeline(company_id: str) -> dict:
-    """
-    Données détaillées du pipeline pour la page Revenue Velocity.
-    """
+def get_pipeline(
+    company_id: str,
+    auth_company_id: str = Depends(verify_api_key),
+) -> dict:
+    assert_company_access(company_id, auth_company_id)
+
     from services.database import get_client, get
 
     try:
         client = get_client()
-
-        # Deals actifs
         active_deals = get("deals", company_id, {"status": "active"})
 
-        # Forecast
         forecast = client.table("forecasts").select("*").eq(
             "company_id", company_id
         ).limit(1).execute()
 
-        # Deals récemment closés (7 derniers jours)
         cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
         recent_won = client.table("deals").select(
             "id, title, amount, closed_at"
@@ -108,14 +91,12 @@ def get_pipeline(company_id: str) -> dict:
             "status", "lost"
         ).gte("closed_at", cutoff).execute()
 
-        # Analyse Win/Loss récente
         win_loss = client.table("win_loss_analyses").select(
             "deal_title, outcome, total_days, analysis, analyzed_at"
         ).eq("company_id", company_id).order(
             "analyzed_at", desc=True
         ).limit(5).execute()
 
-        # Distribution par stage
         stage_distribution = _compute_stage_distribution(active_deals)
 
         return {
@@ -132,33 +113,26 @@ def get_pipeline(company_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ─────────────────────────────────────────
-# CASH (Cash Predictability)
-# ─────────────────────────────────────────
-
 @router.get("/cash/{company_id}")
-def get_cash(company_id: str) -> dict:
-    """
-    Données financières pour la page Cash Predictability.
-    """
-    from services.database import get_client, get
+def get_cash(
+    company_id: str,
+    auth_company_id: str = Depends(verify_api_key),
+) -> dict:
+    assert_company_access(company_id, auth_company_id)
+
+    from services.database import get_client
 
     try:
         client = get_client()
 
-        # Forecast cash
         cash_forecast = client.table("cash_forecasts").select("*").eq(
             "company_id", company_id
         ).limit(1).execute()
 
-        # Factures en retard
         overdue = client.table("invoices").select("*").eq(
             "company_id", company_id
-        ).eq("status", "overdue").order(
-            "due_at"
-        ).execute()
+        ).eq("status", "overdue").order("due_at").execute()
 
-        # Factures récemment payées (30 jours)
         cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
         recently_paid = client.table("invoices").select(
             "id, client_name, amount, paid_at, payment_delay_days"
@@ -166,21 +140,18 @@ def get_cash(company_id: str) -> dict:
             "status", "paid"
         ).gte("paid_at", cutoff).execute()
 
-        # Dépenses récentes (30 jours)
         recent_expenses = client.table("expenses").select(
             "id, vendor, category, amount, date"
         ).eq("company_id", company_id).gte(
             "date", cutoff
         ).order("date", desc=True).limit(20).execute()
 
-        # Historique des relances
         reminders = client.table("invoice_reminders").select(
             "invoice_id, reminder_number, sent_at"
         ).eq("company_id", company_id).order(
             "sent_at", desc=True
         ).limit(20).execute()
 
-        # Calcul du DSO moyen
         paid_data = recently_paid.data or []
         delays = [
             i.get("payment_delay_days", 0)
@@ -192,9 +163,7 @@ def get_cash(company_id: str) -> dict:
         return {
             "cash_forecast": cash_forecast.data[0] if cash_forecast.data else {},
             "overdue_invoices": overdue.data or [],
-            "overdue_total": sum(
-                float(i.get("amount", 0)) for i in (overdue.data or [])
-            ),
+            "overdue_total": sum(float(i.get("amount", 0)) for i in (overdue.data or [])),
             "recently_paid": paid_data,
             "avg_dso_days": round(avg_dso, 1),
             "recent_expenses": recent_expenses.data or [],
@@ -206,41 +175,31 @@ def get_cash(company_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ─────────────────────────────────────────
-# PROCESS (Process Clarity)
-# ─────────────────────────────────────────
-
 @router.get("/process/{company_id}")
-def get_process(company_id: str) -> dict:
-    """
-    Données opérationnelles pour la page Process Clarity.
-    """
+def get_process(
+    company_id: str,
+    auth_company_id: str = Depends(verify_api_key),
+) -> dict:
+    assert_company_access(company_id, auth_company_id)
+
     from services.database import get_client, get
 
     try:
         client = get_client()
 
-        # Métriques process
         metrics = client.table("process_metrics").select("*").eq(
             "company_id", company_id
         ).limit(1).execute()
 
-        # Tâches actives
         active_tasks = get("tasks", company_id)
-        overdue_tasks = [
-            t for t in active_tasks
-            if t.get("status") == "overdue"
-        ]
+        overdue_tasks = [t for t in active_tasks if t.get("status") == "overdue"]
         unassigned_tasks = [
             t for t in active_tasks
-            if not t.get("assignee_id")
-            and t.get("status") != "done"
+            if not t.get("assignee_id") and t.get("status") != "done"
         ]
 
-        # Distribution de charge par personne
         workload = _compute_workload_distribution(active_tasks)
 
-        # Tâches complétées ce mois (pour cycle time)
         cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
         completed = client.table("tasks").select(
             "id, title, assignee_name, cycle_time_days, completed_at"
@@ -248,7 +207,6 @@ def get_process(company_id: str) -> dict:
             "status", "done"
         ).gte("completed_at", cutoff).execute()
 
-        # Historique des ajustements
         adjustments = client.table("adapter_adjustments").select("*").eq(
             "company_id", company_id
         ).eq("agent_name", "process_clarity").order(
@@ -269,50 +227,38 @@ def get_process(company_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ─────────────────────────────────────────
-# ACQUISITION (Acquisition Efficiency)
-# ─────────────────────────────────────────
-
 @router.get("/acquisition/{company_id}")
-def get_acquisition(company_id: str) -> dict:
-    """
-    Données d'acquisition pour la page Acquisition Efficiency.
-    """
+def get_acquisition(
+    company_id: str,
+    auth_company_id: str = Depends(verify_api_key),
+) -> dict:
+    assert_company_access(company_id, auth_company_id)
+
     from services.database import get_client
 
     try:
         client = get_client()
 
-        # Métriques CAC
         cac = client.table("cac_metrics").select("*").eq(
             "company_id", company_id
         ).limit(1).execute()
 
-        # Leads récents avec leur score
         cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
         recent_leads = client.table("contacts").select(
-            "id, email, company_name, source, score, score_label, "
-            "score_reason, created_at"
+            "id, email, company_name, source, score, score_label, score_reason, created_at"
         ).eq("company_id", company_id).gte(
             "created_at", cutoff
         ).order("score", desc=True).limit(20).execute()
 
-        # Distribution des scores
         all_scored = client.table("contacts").select(
             "score_label"
-        ).eq("company_id", company_id).not_.is_(
-            "score_label", "null"
-        ).execute()
+        ).eq("company_id", company_id).not_.is_("score_label", "null").execute()
 
         score_dist = {"hot": 0, "warm": 0, "cold": 0}
         for c in (all_scored.data or []):
             label = c.get("score_label", "cold")
             if label in score_dist:
                 score_dist[label] += 1
-
-        # Historique CAC (pour le trend)
-        # En V1 : on a seulement 1 enregistrement par company
-        # Le trend viendra avec l'historique
 
         return {
             "cac_metrics": cac.data[0] if cac.data else {},
@@ -326,20 +272,15 @@ def get_acquisition(company_id: str) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ─────────────────────────────────────────
-# LOGS ET HISTORIQUE
-# ─────────────────────────────────────────
-
 @router.get("/logs/{company_id}")
 def get_action_logs(
     company_id: str,
     agent: Optional[str] = Query(None),
-    limit: int = Query(50, le=200)
+    limit: int = Query(50, le=200),
+    auth_company_id: str = Depends(verify_api_key),
 ) -> dict:
-    """
-    Historique des actions Kuria pour un client.
-    Filtrable par agent.
-    """
+    assert_company_access(company_id, auth_company_id)
+
     from services.database import get_client
 
     try:
@@ -353,28 +294,19 @@ def get_action_logs(
 
         result = query.execute()
 
-        return {
-            "logs": result.data or [],
-            "count": len(result.data or [])
-        }
+        return {"logs": result.data or [], "count": len(result.data or [])}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ─────────────────────────────────────────
-# UTILITAIRES
+# UTILITAIRES (inchangés)
 # ─────────────────────────────────────────
 
 def _get_latest_kpis(client, company_id: str) -> dict:
-    """Retourne le dernier KPI de chaque agent."""
     kpis = {}
-    agents = [
-        "revenue_velocity",
-        "cash_predictability",
-        "process_clarity",
-        "acquisition_efficiency"
-    ]
+    agents = ["revenue_velocity", "cash_predictability", "process_clarity", "acquisition_efficiency"]
 
     for agent in agents:
         result = client.table("agent_runs").select(
@@ -385,17 +317,12 @@ def _get_latest_kpis(client, company_id: str) -> dict:
 
         if result.data:
             kpis[agent] = result.data[0]
-
     return kpis
 
 
 def _get_active_alerts(client, company_id: str) -> list[dict]:
-    """
-    Alertes actives = actions en attente + cash critique + deals à risque.
-    """
     alerts = []
 
-    # Cash critique
     cash = client.table("cash_forecasts").select(
         "days_until_critical"
     ).eq("company_id", company_id).limit(1).execute()
@@ -410,7 +337,6 @@ def _get_active_alerts(client, company_id: str) -> list[dict]:
                 "agent": "cash_predictability"
             })
 
-    # Deals sans activité
     cutoff = (datetime.utcnow() - timedelta(days=14)).isoformat()
     stagnant = client.table("deals").select("id").eq(
         "company_id", company_id
@@ -418,12 +344,11 @@ def _get_active_alerts(client, company_id: str) -> list[dict]:
         "last_activity_at", cutoff
     ).execute()
 
-    if stagnant.data and len(stagnant.data) > 0:
-        count = len(stagnant.data)
+    if stagnant.data:
         alerts.append({
             "type": "deals_stagnant",
             "severity": "medium",
-            "message": f"{count} deal(s) sans activité depuis 14+ jours",
+            "message": f"{len(stagnant.data)} deal(s) sans activité depuis 14+ jours",
             "agent": "revenue_velocity"
         })
 
@@ -431,51 +356,33 @@ def _get_active_alerts(client, company_id: str) -> list[dict]:
 
 
 def _compute_stage_distribution(deals: list) -> list[dict]:
-    """Distribution des deals par stage (pour le funnel visuel)."""
     stages: dict[str, dict] = {}
-
     for deal in deals:
         stage = deal.get("stage", "unknown")
         amount = float(deal.get("amount") or 0)
 
         if stage not in stages:
             stages[stage] = {"stage": stage, "count": 0, "total_amount": 0}
-
         stages[stage]["count"] += 1
         stages[stage]["total_amount"] += amount
 
-    return sorted(
-        stages.values(),
-        key=lambda s: s.get("stage_order", 0)
-    )
+    return sorted(stages.values(), key=lambda s: s.get("stage_order", 0))
 
 
 def _compute_workload_distribution(tasks: list) -> list[dict]:
-    """Distribution des tâches actives par personne."""
     workload: dict[str, dict] = {}
-
     for task in tasks:
         if task.get("status") == "done":
             continue
 
         name = task.get("assignee_name") or "Non assigné"
         if name not in workload:
-            workload[name] = {
-                "assignee": name,
-                "total": 0,
-                "overdue": 0,
-                "in_progress": 0
-            }
+            workload[name] = {"assignee": name, "total": 0, "overdue": 0, "in_progress": 0}
 
         workload[name]["total"] += 1
-
         if task.get("status") == "overdue":
             workload[name]["overdue"] += 1
         elif task.get("status") == "in_progress":
             workload[name]["in_progress"] += 1
 
-    return sorted(
-        workload.values(),
-        key=lambda w: w["total"],
-        reverse=True
-    )
+    return sorted(workload.values(), key=lambda w: w["total"], reverse=True)
