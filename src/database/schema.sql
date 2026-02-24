@@ -274,3 +274,22 @@ create index pending_actions_company
     where status = 'pending';
 
 
+-- database/schema.sql
+
+create table agent_runs (
+    id               uuid primary key default uuid_generate_v4(),
+    agent            text not null,
+    company_id       uuid not null references companies(id),
+    started_at       timestamptz not null,
+    finished_at      timestamptz not null,
+    duration_seconds numeric,
+    kpi_name         text default '',
+    kpi_value        numeric default 0,
+    actions_count    integer default 0,
+    errors           jsonb default '[]',
+    success          boolean default true,
+    created_at       timestamptz default now()
+);
+
+create index agent_runs_company
+    on agent_runs(company_id, agent, started_at desc);
