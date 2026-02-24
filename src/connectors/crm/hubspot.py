@@ -1,8 +1,7 @@
 # connectors/crm/hubspot.py
 
-import os
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from models import Deal, Contact, DealStatus
 from connectors.base import BaseConnector
@@ -10,7 +9,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-HUBSPOT_BASE_URL = "https://api.hubapi.com"
+HUBSPOT_BASE_URL  = "https://api.hubapi.com"
+HUBSPOT_TOKEN_URL = "https://api.hubapi.com/oauth/v1/token"
+
+# HubSpot : tokens valides 6 heures
+HUBSPOT_TOKEN_LIFETIME_SECONDS = 21600
 
 
 class HubSpotConnector(BaseConnector):
@@ -25,14 +28,76 @@ class HubSpotConnector(BaseConnector):
         }
 
     # ─────────────────────────────────────────
+    # TOKEN REFRESH
+    # ─────────────────────────────────────────
+
+    def refresh_access_token(self) -> bool:
+        """
+        HubSpot OAuth2 token refresh.
+
+        Credentials nécessaires :
+        {
+            "access_token": str,
+            "refresh_token": str,
+            "client_id": str,
+            "client_secret": str,
+            "expires_at": str (ISO)   ← optionnel
+        }
+        """
+        refresh_token = self.credentials.get("refresh_token")
+        client_id     = self.credentials.get("client_id")
+        client_secret = self.credentials.get("client_secret")
+
+        if not all([refresh_token, client_id, client_secret]):
+            logger.warning(
+                "[hubspot] Refresh impossible : "
+                "refresh_token, client_id ou client_secret manquant"
+            )
+            return True  # Pas de refresh disponible → on tente avec le token actuel
+
+        try:
+            response = requests.post(
+                HUBSPOT_TOKEN_URL,
+                data={
+                    "grant_type":    "refresh_token",
+                    "client_id":     client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Calculer la date d'expiration
+            expires_in = data.get(
+                "expires_in", HUBSPOT_TOKEN_LIFETIME_SECONDS
+            )
+            expires_at = (
+                datetime.now(tz=timezone.utc) +
+                timedelta(seconds=expires_in)
+            ).isoformat()
+
+            new_credentials = {
+                **self.credentials,
+                "access_token":  data["access_token"],
+                "refresh_token": data.get("refresh_token", refresh_token),
+                "expires_at":    expires_at
+            }
+
+            self._save_refreshed_credentials(new_credentials)
+            return True
+
+        except requests.RequestException as e:
+            logger.error(f"[hubspot] Erreur refresh token : {e}")
+            return False
+
+    # ─────────────────────────────────────────
     # CONNEXION
     # ─────────────────────────────────────────
 
     def connect(self) -> bool:
-        """
-        Vérifie la connexion en appelant l'endpoint account info.
-        Si ça répond 200, on est connecté.
-        """
         try:
             response = requests.get(
                 f"{HUBSPOT_BASE_URL}/account-info/v3/details",
@@ -40,11 +105,26 @@ class HubSpotConnector(BaseConnector):
                 timeout=10
             )
             if response.status_code == 200:
-                logger.info(f"HubSpot connecté pour company {self.company_id}")
+                logger.info(
+                    f"HubSpot connecté pour company {self.company_id}"
+                )
                 return True
-            else:
-                logger.error(f"HubSpot connexion échouée : {response.status_code}")
-                return False
+
+            # 401 → token expiré → essayer de rafraîchir
+            if response.status_code == 401:
+                logger.warning("[hubspot] 401 sur connect() — tentative de refresh")
+                if self.refresh_access_token():
+                    # Réessayer avec le nouveau token
+                    response2 = requests.get(
+                        f"{HUBSPOT_BASE_URL}/account-info/v3/details",
+                        headers=self._get_headers(),
+                        timeout=10
+                    )
+                    return response2.status_code == 200
+
+            logger.error(f"HubSpot connexion échouée : {response.status_code}")
+            return False
+
         except requests.RequestException as e:
             logger.error(f"HubSpot connexion exception : {e}")
             return False
@@ -54,10 +134,10 @@ class HubSpotConnector(BaseConnector):
     # ─────────────────────────────────────────
 
     def fetch_deals(self) -> list[Deal]:
-        """
-        Récupère tous les deals HubSpot et les normalise.
-        Gère la pagination automatiquement.
-        """
+        # ensure_valid_token est appelé dans la classe parente
+        if not self.ensure_valid_token():
+            return []
+
         raw_deals = self._fetch_all_deals()
         deals = []
 
@@ -66,33 +146,22 @@ class HubSpotConnector(BaseConnector):
             if deal:
                 deals.append(deal)
 
-        logger.info(f"HubSpot : {len(deals)} deals récupérés pour {self.company_id}")
+        logger.info(
+            f"HubSpot : {len(deals)} deals récupérés "
+            f"pour {self.company_id}"
+        )
         return deals
 
     def _fetch_all_deals(self) -> list[dict]:
-        """
-        Récupère tous les deals via l'API HubSpot avec pagination.
-        HubSpot retourne max 100 deals par page.
-        """
         all_deals = []
         after = None
 
-        # Les propriétés qu'on veut récupérer
         properties = [
-            "dealname",
-            "amount",
-            "dealstage",
-            "pipeline",
-            "closedate",
-            "createdate",
-            "hs_lastmodifieddate",
-            "hs_activity_timestamp",   # dernière activité
-            "hubspot_owner_id",
-            "hs_deal_stage_probability",
-            "closed_lost_reason",
-            "hs_is_closed_won",
-            "hs_is_closed",
-            "lead_source",             # source du lead
+            "dealname", "amount", "dealstage", "pipeline",
+            "closedate", "createdate", "hs_lastmodifieddate",
+            "hs_activity_timestamp", "hubspot_owner_id",
+            "hs_deal_stage_probability", "hs_is_closed_won",
+            "hs_is_closed", "lead_source",
         ]
 
         while True:
@@ -111,15 +180,29 @@ class HubSpotConnector(BaseConnector):
                     params=params,
                     timeout=30
                 )
+
+                # Gestion du 401 en cours de pagination
+                if response.status_code == 401:
+                    logger.warning(
+                        "[hubspot] 401 pendant fetch_deals — refresh et retry"
+                    )
+                    if self.refresh_access_token():
+                        response = requests.get(
+                            f"{HUBSPOT_BASE_URL}/crm/v3/objects/deals",
+                            headers=self._get_headers(),
+                            params=params,
+                            timeout=30
+                        )
+                    else:
+                        break
+
                 response.raise_for_status()
                 data = response.json()
 
                 all_deals.extend(data.get("results", []))
 
-                # Pagination
                 paging = data.get("paging", {})
-                next_page = paging.get("next", {})
-                after = next_page.get("after")
+                after  = paging.get("next", {}).get("after")
 
                 if not after:
                     break
@@ -131,19 +214,14 @@ class HubSpotConnector(BaseConnector):
         return all_deals
 
     def _normalize_deal(self, raw: dict) -> Optional[Deal]:
-        """
-        Traduit un deal HubSpot brut en Deal Kuria.
-        Si une donnée critique manque, retourne None.
-        """
         try:
-            props = raw.get("properties", {})
+            props  = raw.get("properties", {})
             raw_id = raw.get("id", "")
 
             if not raw_id:
                 return None
 
-            # Statut
-            is_won = props.get("hs_is_closed_won", "false") == "true"
+            is_won    = props.get("hs_is_closed_won", "false") == "true"
             is_closed = props.get("hs_is_closed", "false") == "true"
 
             if is_won:
@@ -153,8 +231,7 @@ class HubSpotConnector(BaseConnector):
             else:
                 status = DealStatus.ACTIVE
 
-            # Dates
-            last_activity = self._parse_hs_date(
+            last_activity = self._parse_datetime(
                 props.get("hs_activity_timestamp") or
                 props.get("hs_lastmodifieddate")
             )
@@ -165,13 +242,17 @@ class HubSpotConnector(BaseConnector):
                 title=self._safe_str(props.get("dealname"), "Sans titre"),
                 amount=self._safe_float(props.get("amount")),
                 stage=self._safe_str(props.get("dealstage")),
-                stage_order=0,              # enrichi après via fetch_pipeline_stages
-                probability=self._safe_float(props.get("hs_deal_stage_probability")),
+                stage_order=0,
+                probability=self._safe_float(
+                    props.get("hs_deal_stage_probability")
+                ),
                 status=status,
-                created_at=self._parse_hs_date(props.get("createdate")) or datetime.utcnow(),
+                created_at=self._parse_datetime(
+                    props.get("createdate")
+                ) or datetime.utcnow(),
                 last_activity_at=last_activity,
-                closed_at=self._parse_hs_date(props.get("closedate")),
-                expected_close_date=self._parse_hs_date(props.get("closedate")),
+                closed_at=self._parse_datetime(props.get("closedate")),
+                expected_close_date=self._parse_datetime(props.get("closedate")),
                 owner_id=self._safe_str(props.get("hubspot_owner_id")),
                 source=self._safe_str(props.get("lead_source")),
                 connector_source="hubspot",
@@ -179,7 +260,9 @@ class HubSpotConnector(BaseConnector):
             )
 
         except Exception as e:
-            logger.error(f"HubSpot normalize_deal erreur sur {raw.get('id')}: {e}")
+            logger.error(
+                f"HubSpot normalize_deal erreur sur {raw.get('id')}: {e}"
+            )
             return None
 
     # ─────────────────────────────────────────
@@ -187,9 +270,9 @@ class HubSpotConnector(BaseConnector):
     # ─────────────────────────────────────────
 
     def fetch_contacts(self) -> list[Contact]:
-        """
-        Récupère tous les contacts HubSpot.
-        """
+        if not self.ensure_valid_token():
+            return []
+
         raw_contacts = self._fetch_all_contacts()
         contacts = []
 
@@ -206,12 +289,9 @@ class HubSpotConnector(BaseConnector):
         after = None
 
         properties = [
-            "firstname", "lastname", "email",
-            "company", "jobtitle",
-            "num_employees",               # taille de l'entreprise
-            "hs_lead_status",
-            "hs_analytics_source",         # source first touch
-            "createdate",
+            "firstname", "lastname", "email", "company",
+            "num_employees", "hs_lead_status",
+            "hs_analytics_source", "createdate",
             "notes_last_activity",
         ]
 
@@ -230,13 +310,25 @@ class HubSpotConnector(BaseConnector):
                     params=params,
                     timeout=30
                 )
+
+                if response.status_code == 401:
+                    if self.refresh_access_token():
+                        response = requests.get(
+                            f"{HUBSPOT_BASE_URL}/crm/v3/objects/contacts",
+                            headers=self._get_headers(),
+                            params=params,
+                            timeout=30
+                        )
+                    else:
+                        break
+
                 response.raise_for_status()
                 data = response.json()
 
                 all_contacts.extend(data.get("results", []))
 
                 paging = data.get("paging", {})
-                after = paging.get("next", {}).get("after")
+                after  = paging.get("next", {}).get("after")
                 if not after:
                     break
 
@@ -248,7 +340,7 @@ class HubSpotConnector(BaseConnector):
 
     def _normalize_contact(self, raw: dict) -> Optional[Contact]:
         try:
-            props = raw.get("properties", {})
+            props  = raw.get("properties", {})
             raw_id = raw.get("id", "")
 
             if not raw_id:
@@ -265,10 +357,16 @@ class HubSpotConnector(BaseConnector):
                 first_name=self._safe_str(props.get("firstname")),
                 last_name=self._safe_str(props.get("lastname")),
                 company_name=self._safe_str(props.get("company")),
-                company_size=self._safe_int(props.get("num_employees")) or None,
+                company_size=self._safe_int(
+                    props.get("num_employees")
+                ) or None,
                 source=self._safe_str(props.get("hs_analytics_source")),
-                created_at=self._parse_hs_date(props.get("createdate")) or datetime.utcnow(),
-                last_activity_at=self._parse_hs_date(props.get("notes_last_activity")),
+                created_at=self._parse_datetime(
+                    props.get("createdate")
+                ) or datetime.utcnow(),
+                last_activity_at=self._parse_datetime(
+                    props.get("notes_last_activity")
+                ),
                 connector_source="hubspot",
                 raw_id=raw_id
             )
@@ -282,11 +380,8 @@ class HubSpotConnector(BaseConnector):
     # ─────────────────────────────────────────
 
     def update_deal(self, raw_id: str, fields: dict) -> bool:
-        """
-        Met à jour un deal HubSpot.
-        fields : propriétés HubSpot natives
-                 ex: {"dealstage": "closedwon", "axio_status": "zombie"}
-        """
+        if not self.ensure_valid_token():
+            return False
         try:
             response = requests.patch(
                 f"{HUBSPOT_BASE_URL}/crm/v3/objects/deals/{raw_id}",
@@ -301,11 +396,9 @@ class HubSpotConnector(BaseConnector):
             return False
 
     def add_note(self, deal_raw_id: str, note: str) -> bool:
-        """
-        Ajoute une note à un deal via l'API engagement.
-        """
+        if not self.ensure_valid_token():
+            return False
         try:
-            # Créer la note
             note_response = requests.post(
                 f"{HUBSPOT_BASE_URL}/crm/v3/objects/notes",
                 headers=self._get_headers(),
@@ -320,7 +413,6 @@ class HubSpotConnector(BaseConnector):
             note_response.raise_for_status()
             note_id = note_response.json()["id"]
 
-            # Associer la note au deal
             assoc_response = requests.put(
                 f"{HUBSPOT_BASE_URL}/crm/v3/objects/notes/{note_id}"
                 f"/associations/deals/{deal_raw_id}/note_to_deal",
@@ -335,14 +427,8 @@ class HubSpotConnector(BaseConnector):
             return False
 
     def create_task(self, deal_raw_id: str, task_data: dict) -> bool:
-        """
-        Crée une tâche dans HubSpot associée à un deal.
-        task_data : {
-            "title": str,
-            "due_date": datetime,
-            "assigned_to": str (owner_id HubSpot)
-        }
-        """
+        if not self.ensure_valid_token():
+            return False
         try:
             due_ms = int(task_data["due_date"].timestamp() * 1000)
 
@@ -362,7 +448,6 @@ class HubSpotConnector(BaseConnector):
             task_response.raise_for_status()
             task_id = task_response.json()["id"]
 
-            # Associer au deal
             requests.put(
                 f"{HUBSPOT_BASE_URL}/crm/v3/objects/tasks/{task_id}"
                 f"/associations/deals/{deal_raw_id}/task_to_deal",
@@ -374,23 +459,3 @@ class HubSpotConnector(BaseConnector):
         except requests.RequestException as e:
             logger.error(f"HubSpot create_task erreur : {e}")
             return False
-
-    # ─────────────────────────────────────────
-    # UTILITAIRES HUBSPOT
-    # ─────────────────────────────────────────
-
-    def _parse_hs_date(self, value) -> Optional[datetime]:
-        """
-        HubSpot retourne les dates en plusieurs formats :
-        - ISO string : "2025-03-15T10:30:00.000Z"
-        - Timestamp ms : 1742123400000
-        Retourne un datetime UTC ou None.
-        """
-        if not value:
-            return None
-        try:
-            if isinstance(value, (int, float)):
-                return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            return None
