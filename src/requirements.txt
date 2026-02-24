@@ -1,0 +1,36 @@
+# requirements.txt
+
+# API
+fastapi==0.111.0
+uvicorn==0.29.0
+
+# Scheduler
+apscheduler==3.10.4
+
+# Base de données
+supabase==2.4.2
+
+# LLM
+anthropic==0.25.0
+
+# HTTP
+requests==2.31.0
+
+# Email
+resend==2.0.0
+
+# Paiements
+stripe==9.5.0
+
+# Excel/CSV fallback
+pandas==2.2.2
+openpyxl==3.1.2
+
+# Dashboard
+streamlit==1.35.0
+
+# Variables d'environnement
+python-dotenv==1.0.1
+
+# Utilitaires
+python-dateutil==2.9.0
