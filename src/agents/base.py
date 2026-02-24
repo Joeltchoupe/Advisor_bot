@@ -2,7 +2,8 @@
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 from dataclasses import dataclass, field
 
 from services.database import get, get_client
@@ -13,19 +14,19 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────
-# RÉSULTAT D'UN RUN D'AGENT
+# RÉSULTAT D'UN RUN
 # ─────────────────────────────────────────
 
 @dataclass
 class AgentRunResult:
-    agent: str
-    company_id: str
-    started_at: datetime
-    finished_at: datetime
+    agent:        str
+    company_id:   str
+    started_at:   datetime
+    finished_at:  datetime
     actions_taken: list[dict] = field(default_factory=list)
-    kpi_value: float = 0.0
-    kpi_name: str = ""
-    errors: list[str] = field(default_factory=list)
+    kpi_value:    float = 0.0
+    kpi_name:     str   = ""
+    errors:       list[str] = field(default_factory=list)
 
     @property
     def duration_seconds(self) -> float:
@@ -37,53 +38,29 @@ class AgentRunResult:
 
 
 # ─────────────────────────────────────────
-# AGENT DE BASE
+# BASE AGENT
 # ─────────────────────────────────────────
 
 class BaseAgent(ABC):
-    """
-    Tout agent hérite de cette classe.
-
-    Elle fournit :
-    → Le cycle run() standard
-    → L'accès aux données via _get_data()
-    → La publication d'events via _publish()
-    → Le logging du résultat
-    """
 
     def __init__(self, company_id: str, config: dict):
-        """
-        company_id : le client pour lequel tourne l'agent
-        config     : la configuration spécifique à ce client
-                     (seuils, fréquences, channels de notification)
-                     vient du profil client dans Supabase
-        """
         self.company_id = company_id
-        self.config = config
-        self.name = self._get_name()
-        self._run_result: AgentRunResult = None
+        self.config     = config
+        self.name       = self._get_name()
 
     @abstractmethod
     def _get_name(self) -> str:
-        """Nom de l'agent. Ex: 'revenue_velocity'"""
         pass
 
     @abstractmethod
     def _run(self) -> AgentRunResult:
-        """
-        La logique de l'agent.
-        Appelée par run().
-        Doit retourner un AgentRunResult.
-        """
         pass
 
     def run(self) -> AgentRunResult:
-        """
-        Point d'entrée public.
-        Encapsule _run() avec logging et gestion d'erreur globale.
-        """
         started_at = datetime.utcnow()
-        logger.info(f"[{self.name}] Démarrage pour company {self.company_id}")
+        logger.info(
+            f"[{self.name}] Démarrage pour company {self.company_id}"
+        )
 
         try:
             result = self._run()
@@ -97,7 +74,6 @@ class BaseAgent(ABC):
                 errors=[str(e)]
             )
 
-        # Log du run dans Supabase
         self._log_run(result)
 
         logger.info(
@@ -134,10 +110,11 @@ class BaseAgent(ABC):
         ).limit(1).execute()
         return result.data[0] if result.data else {}
 
-    def _get_action_logs(self, agent: str = None, limit: int = 100) -> list[dict]:
-        """Historique des actions pour évaluation et apprentissage."""
+    def _get_action_logs(
+        self, agent: str = None, limit: int = 100
+    ) -> list[dict]:
         client = get_client()
-        query = client.table("action_logs").select("*").eq(
+        query  = client.table("action_logs").select("*").eq(
             "company_id", self.company_id
         ).order("executed_at", desc=True).limit(limit)
 
@@ -148,13 +125,48 @@ class BaseAgent(ABC):
         return result.data or []
 
     # ─────────────────────────────────────────
+    # CONNECTEUR — FACTORY CENTRALISÉE
+    # Plus de _get_crm_connector() dans chaque agent
+    # ─────────────────────────────────────────
+
+    def _get_connector(self, category: str = "crm"):
+        """
+        Retourne le connecteur actif pour une catégorie donnée.
+
+        category : "crm" | "finance" | "payments" | "email" | "project"
+
+        Utilise la factory de connectors/__init__.py.
+        Charge automatiquement les credentials depuis Supabase.
+        """
+        from connectors import get_connector_from_db
+
+        company  = self._get_company()
+        tools    = company.get("tools_connected") or {}
+        tool_cfg = tools.get(category, {})
+        tool_name = tool_cfg.get("name", "")
+
+        if not tool_name:
+            logger.debug(
+                f"[{self.name}] Pas d'outil {category} configuré "
+                f"pour {self.company_id}"
+            )
+            return None
+
+        connector = get_connector_from_db(tool_name, self.company_id)
+
+        if not connector:
+            logger.warning(
+                f"[{self.name}] Impossible d'instancier {tool_name}"
+            )
+            return None
+
+        return connector
+
+    # ─────────────────────────────────────────
     # PUBLICATION D'EVENTS
     # ─────────────────────────────────────────
 
     def _publish(self, event_type: str, payload: dict) -> None:
-        """
-        Publie un event que le router peut distribuer aux autres agents.
-        """
         from services.database import publish_event
         publish_event(
             event_type=event_type,
@@ -163,12 +175,75 @@ class BaseAgent(ABC):
         )
 
     # ─────────────────────────────────────────
-    # CONFIG HELPERS
+    # CONFIG
     # ─────────────────────────────────────────
 
     def _cfg(self, key: str, default=None):
-        """Raccourci pour lire la config de l'agent."""
         return self.config.get(key, default)
+
+    # ─────────────────────────────────────────
+    # PARSE DATE — CENTRALISÉ ICI
+    # N'existe plus dans chaque agent séparément
+    # ─────────────────────────────────────────
+
+    def _parse_date(self, value) -> Optional[datetime]:
+        """
+        Parse universelle des dates pour les agents.
+        Centralisé dans base.py — une seule version dans tout le système.
+
+        Gère :
+        → datetime natif Python
+        → ISO 8601 avec ou sans timezone
+        → Timestamps millisecondes
+        → Strings "YYYY-MM-DD"
+        """
+        if not value:
+            return None
+
+        if isinstance(value, datetime):
+            # Normaliser vers UTC naive pour la cohérence
+            if value.tzinfo is not None:
+                return value.replace(tzinfo=None)
+            return value
+
+        try:
+            s = str(value).strip()
+
+            # Timestamp millisecondes (HubSpot)
+            if s.isdigit() and len(s) == 13:
+                return datetime.utcfromtimestamp(int(s) / 1000)
+
+            # Timestamp secondes
+            if s.isdigit() and len(s) == 10:
+                return datetime.utcfromtimestamp(int(s))
+
+            # Normaliser le Z
+            s = s.replace("Z", "+00:00")
+
+            if "T" in s:
+                dt = datetime.fromisoformat(s)
+                # Convertir en UTC naive
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt
+
+            # Date seule
+            if len(s) >= 10:
+                return datetime.strptime(s[:10], "%Y-%m-%d")
+
+            return None
+
+        except (ValueError, TypeError, OSError):
+            return None
+
+    def _is_recent(self, date_str, days: int = 7) -> bool:
+        """Vérifie si une date est dans les N derniers jours."""
+        if not date_str:
+            return False
+        dt = self._parse_date(date_str)
+        if not dt:
+            return False
+        return (datetime.utcnow() - dt).days <= days
 
     # ─────────────────────────────────────────
     # LOGGING
@@ -178,16 +253,16 @@ class BaseAgent(ABC):
         try:
             client = get_client()
             client.table("agent_runs").insert({
-                "agent": result.agent,
-                "company_id": result.company_id,
-                "started_at": result.started_at.isoformat(),
-                "finished_at": result.finished_at.isoformat(),
+                "agent":           result.agent,
+                "company_id":      result.company_id,
+                "started_at":      result.started_at.isoformat(),
+                "finished_at":     result.finished_at.isoformat(),
                 "duration_seconds": result.duration_seconds,
-                "kpi_name": result.kpi_name,
-                "kpi_value": result.kpi_value,
-                "actions_count": len(result.actions_taken),
-                "errors": result.errors,
-                "success": result.success
+                "kpi_name":        result.kpi_name,
+                "kpi_value":       result.kpi_value,
+                "actions_count":   len(result.actions_taken),
+                "errors":          result.errors,
+                "success":         result.success
             }).execute()
         except Exception as e:
             logger.error(f"Erreur log run : {e}")
