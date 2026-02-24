@@ -99,3 +99,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
                                        )
+
+# À ajouter dans api/main.py
+
+from fastapi import Header, HTTPException
+
+async def verify_token(x_api_key: str = Header(...)):
+    """
+    Middleware d'auth minimaliste pour la V1.
+    Chaque client a une clé dans Supabase.
+    """
+    from services.database import get_client
+    client = get_client()
+
+    result = client.table("companies").select(
+        "id"
+    ).eq("api_key", x_api_key).limit(1).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=401, detail="Non autorisé")
+
+    return result.data[0]["id"]
