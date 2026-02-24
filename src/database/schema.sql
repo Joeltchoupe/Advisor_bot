@@ -221,3 +221,56 @@ $$ language plpgsql;
 create trigger companies_updated_at
     before update on companies
     for each row execute function update_updated_at();
+
+
+
+
+-- À ajouter dans database/schema.sql
+
+-- ─────────────────────────────────────────
+-- ACTION LOGS (tout ce que Kuria a fait)
+-- ─────────────────────────────────────────
+create table action_logs (
+    id              uuid primary key default uuid_generate_v4(),
+    action_type     text not null,
+    level           text not null,
+    company_id      uuid not null references companies(id),
+    agent           text not null,
+    payload         jsonb default '{}',
+    status          text not null,
+    result          jsonb default '{}',
+    error           text default '',
+    attempts        integer default 1,
+    executed_at     timestamptz default now()
+);
+
+create index action_logs_company
+    on action_logs(company_id, executed_at desc);
+
+create index action_logs_agent
+    on action_logs(company_id, agent, executed_at desc);
+
+
+-- ─────────────────────────────────────────
+-- PENDING ACTIONS (niveau B et C en attente)
+-- ─────────────────────────────────────────
+create table pending_actions (
+    id              uuid primary key default uuid_generate_v4(),
+    action_type     text not null,
+    level           text not null,
+    company_id      uuid not null references companies(id),
+    agent           text not null,
+    payload         jsonb default '{}',
+    description     text default '',
+    preview         jsonb default '{}',
+    status          text default 'pending',
+    result          jsonb default '{}',
+    created_at      timestamptz default now(),
+    executed_at     timestamptz
+);
+
+create index pending_actions_company
+    on pending_actions(company_id, status)
+    where status = 'pending';
+
+
