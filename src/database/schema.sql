@@ -404,3 +404,150 @@ create table adapter_adjustments (
     applied_at  timestamptz default now(),
     applied_by  text default 'consultant'
 );
+
+
+-- ─────────────────────────────────────────
+-- CREDENTIALS — avec refresh_token
+-- NOUVEAU : structure complète pour OAuth
+-- ─────────────────────────────────────────
+
+create table credentials (
+    id          uuid primary key default uuid_generate_v4(),
+    company_id  uuid not null references companies(id),
+    tool        text not null,
+
+    -- Structure credentials attendue :
+    -- {
+    --   "access_token":  "...",
+    --   "refresh_token": "...",   ← NOUVEAU
+    --   "client_id":     "...",   ← NOUVEAU
+    --   "client_secret": "...",   ← NOUVEAU
+    --   "expires_at":    "...",   ← NOUVEAU (ISO datetime)
+    --   "portal_id":     "...",   ← HubSpot
+    --   "realm_id":      "...",   ← QuickBooks
+    --   "tenant_id":     "...",   ← Xero
+    --   "instance_url":  "...",   ← Salesforce
+    --   "api_version":   "..."    ← Salesforce
+    -- }
+    credentials jsonb not null,
+
+    unique (company_id, tool)
+);
+
+
+-- ─────────────────────────────────────────
+-- UPDATED_AT AUTOMATIQUE
+-- ─────────────────────────────────────────
+
+create or replace function update_updated_at()
+returns trigger as $$
+begin
+    new.updated_at = now();
+    return new;
+end;
+$$ language plpgsql;
+
+create trigger companies_updated_at
+    before update on companies
+    for each row execute function update_updated_at();
+
+
+-- ─────────────────────────────────────────
+-- ROW LEVEL SECURITY
+-- Protège les credentials et les données clients
+-- ─────────────────────────────────────────
+
+-- Activer RLS sur toutes les tables sensibles
+alter table companies         enable row level security;
+alter table credentials       enable row level security;
+alter table deals             enable row level security;
+alter table contacts          enable row level security;
+alter table invoices          enable row level security;
+alter table tasks             enable row level security;
+alter table expenses          enable row level security;
+alter table events            enable row level security;
+alter table action_logs       enable row level security;
+alter table pending_actions   enable row level security;
+alter table agent_runs        enable row level security;
+alter table forecasts         enable row level security;
+alter table cash_forecasts    enable row level security;
+alter table win_loss_analyses enable row level security;
+alter table process_metrics   enable row level security;
+alter table cac_metrics       enable row level security;
+alter table invoice_reminders enable row level security;
+alter table task_reminders    enable row level security;
+alter table team_members      enable row level security;
+alter table adapter_adjustments enable row level security;
+
+
+-- ─────────────────────────────────────────
+-- POLICIES
+--
+-- Règle simple et sécurisée pour la V1 :
+-- Seul le service_role peut lire et écrire.
+-- Le rôle anon (client Lovable) ne peut RIEN.
+-- Lovable appelle l'API FastAPI qui utilise service_role.
+-- Jamais Lovable n'appelle Supabase directement.
+-- ─────────────────────────────────────────
+
+-- Fonction helper
+create or replace function is_service_role()
+returns boolean as $$
+begin
+    return current_setting('role', true) = 'service_role';
+end;
+$$ language plpgsql security definer;
+
+-- Appliquer la policy sur chaque table
+do $$
+declare
+    tbl text;
+    tables text[] := array[
+        'companies', 'credentials', 'deals', 'contacts',
+        'invoices', 'tasks', 'expenses', 'events',
+        'action_logs', 'pending_actions', 'agent_runs',
+        'forecasts', 'cash_forecasts', 'win_loss_analyses',
+        'process_metrics', 'cac_metrics', 'invoice_reminders',
+        'task_reminders', 'team_members', 'adapter_adjustments'
+    ];
+begin
+    foreach tbl in array tables loop
+
+        -- SELECT : service_role uniquement
+        execute format(
+            'create policy "%s_service_role_select"
+             on %s for select
+             to service_role
+             using (true)',
+            tbl, tbl
+        );
+
+        -- INSERT : service_role uniquement
+        execute format(
+            'create policy "%s_service_role_insert"
+             on %s for insert
+             to service_role
+             with check (true)',
+            tbl, tbl
+        );
+
+        -- UPDATE : service_role uniquement
+        execute format(
+            'create policy "%s_service_role_update"
+             on %s for update
+             to service_role
+             using (true)',
+            tbl, tbl
+        );
+
+        -- DELETE : service_role uniquement
+        execute format(
+            'create policy "%s_service_role_delete"
+             on %s for delete
+             to service_role
+             using (true)',
+            tbl, tbl
+        );
+
+    end loop;
+end $$;
