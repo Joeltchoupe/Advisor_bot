@@ -548,4 +548,271 @@ class RevenueVelocityAgent(BaseAgent):
             return {"count": 0, "avg_amount": 0, "common_sources": []}
 
         amounts = [float(d.get("amount") or 0) for d in won_deals if d.get("amount")]
-     
+        sources = [d.get("source") for d in won_deals if d.get("source")]
+
+        # Sources les plus fréquentes
+        source_counts: dict[str, int] = {}
+        for s in sources:
+            source_counts[s] = source_counts.get(s, 0) + 1
+        common_sources = sorted(
+            source_counts.keys(),
+            key=lambda x: source_counts[x],
+            reverse=True
+        )[:3]
+
+        return {
+            "count": len(won_deals),
+            "avg_amount": statistics.mean(amounts) if amounts else 0,
+            "common_sources": common_sources
+        }
+
+    def _compute_source_conversion_rates(self, won_deals: list) -> dict:
+        """
+        Taux de conversion par source =
+        deals WON avec cette source / total deals avec cette source.
+        """
+        all_deals = self._get_deals()
+        won_by_source: dict[str, int] = {}
+        total_by_source: dict[str, int] = {}
+
+        for deal in all_deals:
+            source = deal.get("source", "unknown")
+            total_by_source[source] = total_by_source.get(source, 0) + 1
+
+        for deal in won_deals:
+            source = deal.get("source", "unknown")
+            won_by_source[source] = won_by_source.get(source, 0) + 1
+
+        rates = {}
+        for source, total in total_by_source.items():
+            won = won_by_source.get(source, 0)
+            rates[source] = won / total if total >= 3 else 0.2
+
+        return rates
+
+    def _compute_lead_score(
+        self,
+        contact: dict,
+        won_profile: dict,
+        source_rates: dict
+    ) -> tuple[int, dict]:
+        """
+        Score = fit (50%) + source (30%) + timing (20%)
+        Chaque composante est normalisée sur 100.
+        """
+        # FIT SCORE (50%)
+        # Basé sur la source et le montant similaire des deals WON
+        source = contact.get("source", "")
+        is_common_source = source in won_profile.get("common_sources", [])
+        fit_raw = 0.7 if is_common_source else 0.4
+        # Bonus si la taille d'entreprise est connue
+        if contact.get("company_size"):
+            fit_raw = min(1.0, fit_raw + 0.2)
+        fit_score = fit_raw * 100
+
+        # SOURCE SCORE (30%)
+        source_rate = source_rates.get(source, 0.2)
+        source_score = min(100, source_rate * 200)   # 50% conv rate → 100
+
+        # TIMING SCORE (20%)
+        last_activity = self._parse_date(contact.get("last_activity_at"))
+        if last_activity:
+            hours_since = (datetime.utcnow() - last_activity).total_seconds() / 3600
+            timing_score = max(0, 100 - (hours_since * 2))   # -2pts/heure
+        else:
+            timing_score = 50.0
+
+        # Score final pondéré
+        final_score = int(
+            fit_score * 0.5 +
+            source_score * 0.3 +
+            timing_score * 0.2
+        )
+        final_score = max(0, min(100, final_score))
+
+        breakdown = {
+            "fit": round(fit_score, 1),
+            "source": round(source_score, 1),
+            "timing": round(timing_score, 1)
+        }
+
+        return final_score, breakdown
+
+    # ─────────────────────────────────────────
+    # 1.9 — ANALYSE WIN/LOSS
+    # ─────────────────────────────────────────
+
+    def _analyze_win_loss(
+        self, closed_deals: list, all_deals: list
+    ) -> list[dict]:
+        """
+        Pour chaque deal récemment fermé :
+        - Calcule les métriques du deal
+        - Les compare aux deals WON historiques
+        - Génère une analyse avec le LLM
+        - Sauvegarde pour améliorer le scoring futur
+        """
+        if not closed_deals:
+            return []
+
+        actions_taken = []
+        won_deals = [d for d in all_deals if d.get("status") == "won"]
+
+        # Métriques moyennes des deals WON (référence)
+        avg_won_days = self._compute_avg_total_days(won_deals)
+        avg_won_activities = 8   # valeur par défaut, sera affinée
+
+        for deal in closed_deals:
+            outcome = deal.get("status")    # "won" ou "lost"
+
+            created = self._parse_date(deal.get("created_at"))
+            closed  = self._parse_date(deal.get("closed_at"))
+            total_days = (closed - created).days if created and closed else 0
+
+            # Analyse LLM
+            analysis = generate(
+                data={
+                    "deal": {
+                        "title": deal.get("title"),
+                        "amount": deal.get("amount"),
+                        "stage": deal.get("stage"),
+                        "owner": deal.get("owner_name")
+                    },
+                    "outcome": outcome,
+                    "total_days": total_days,
+                    "avg_won_days": round(avg_won_days, 1),
+                    "days_vs_avg": round(total_days - avg_won_days, 1)
+                },
+                instruction=win_loss_analysis(
+                    deal_title=deal.get("title", ""),
+                    outcome=outcome,
+                    total_days=total_days,
+                    avg_won_days=avg_won_days,
+                    stage_durations={},
+                    bottleneck_stage=deal.get("stage", ""),
+                    bottleneck_days=0,
+                    avg_activities=avg_won_activities,
+                    actual_activities=0
+                )
+            )
+
+            # Sauvegarder l'analyse
+            try:
+                client = get_client()
+                client.table("win_loss_analyses").insert({
+                    "company_id": self.company_id,
+                    "deal_id": deal.get("id"),
+                    "deal_title": deal.get("title"),
+                    "outcome": outcome,
+                    "total_days": total_days,
+                    "avg_won_days": avg_won_days,
+                    "analysis": analysis,
+                    "analyzed_at": datetime.utcnow().isoformat()
+                }).execute()
+            except Exception as e:
+                logger.error(f"Erreur save win_loss : {e}")
+
+            actions_taken.append({
+                "action": "win_loss_analysis",
+                "deal_id": deal.get("id"),
+                "outcome": outcome,
+                "total_days": total_days
+            })
+
+        return actions_taken
+
+    def _compute_avg_total_days(self, won_deals: list) -> float:
+        durations = []
+        for deal in won_deals:
+            created = self._parse_date(deal.get("created_at"))
+            closed  = self._parse_date(deal.get("closed_at"))
+            if created and closed:
+                durations.append((closed - created).days)
+        return statistics.mean(durations) if durations else 30.0
+
+    # ─────────────────────────────────────────
+    # UTILITAIRES
+    # ─────────────────────────────────────────
+
+    def _get_crm_connector(self):
+        """
+        Retourne le bon connecteur CRM selon les outils du client.
+        """
+        company = self._get_company()
+        tools = company.get("tools_connected", {})
+        crm_tool = tools.get("crm", {}).get("name", "")
+
+        credentials = self._get_credentials(crm_tool)
+        if not credentials:
+            return None
+
+        if crm_tool == "hubspot":
+            from connectors.crm.hubspot import HubSpotConnector
+            return HubSpotConnector(self.company_id, credentials)
+        elif crm_tool == "salesforce":
+            from connectors.crm.salesforce import SalesforceConnector
+            return SalesforceConnector(self.company_id, credentials)
+        elif crm_tool == "pipedrive":
+            from connectors.crm.pipedrive import PipedriveConnector
+            return PipedriveConnector(self.company_id, credentials)
+        elif crm_tool == "zoho":
+            from connectors.crm.zoho import ZohoConnector
+            return ZohoConnector(self.company_id, credentials)
+
+        return None
+
+    def _get_credentials(self, tool: str) -> Optional[dict]:
+        """Récupère les credentials d'un outil depuis Supabase."""
+        try:
+            client = get_client()
+            result = client.table("credentials").select("*").eq(
+                "company_id", self.company_id
+            ).eq("tool", tool).limit(1).execute()
+            return result.data[0].get("credentials") if result.data else None
+        except Exception:
+            return None
+
+    def _get_owner_email(self, owner_id: str) -> Optional[str]:
+        """Récupère l'email d'un owner via la table team_members."""
+        if not owner_id:
+            return None
+        try:
+            client = get_client()
+            result = client.table("team_members").select("email").eq(
+                "company_id", self.company_id
+            ).eq("crm_owner_id", owner_id).limit(1).execute()
+            return result.data[0].get("email") if result.data else None
+        except Exception:
+            return None
+
+    def _is_recent(self, date_str: Optional[str], days: int = 7) -> bool:
+        if not date_str:
+            return False
+        dt = self._parse_date(date_str)
+        if not dt:
+            return False
+        return (datetime.utcnow() - dt).days <= days
+
+    def _parse_date(self, value) -> Optional[datetime]:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+        
+      
+
+
+
+
+
+
+
+
+
+
+
