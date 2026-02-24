@@ -32,170 +32,143 @@ class TaskStatus(str, Enum):
 
 
 class LeadScore(str, Enum):
-    HOT = "hot"        # > 70
-    WARM = "warm"      # 40-70
-    COLD = "cold"      # < 40
+    HOT = "hot"
+    WARM = "warm"
+    COLD = "cold"
 
 
 # ─────────────────────────────────────────
 # CORE MODELS
+# RÈGLE PYTHON 3.12 :
+# - champs obligatoires (sans default) d'abord
+# - champs avec default ensuite
 # ─────────────────────────────────────────
 
 @dataclass
 class Deal:
-    # Identité
+    # Obligatoires
     id: str
+    company_id: str
+    connector_source: str          # NOT NULL en DB
+    raw_id: str                    # NOT NULL en DB
+
     title: str
-    company_id: str                    # à quel client Kuria appartient ce deal
-
-    # Valeur
     amount: float
+    stage: str
+
+    # Optionnels / defaults
     currency: str = "EUR"
+    stage_order: int = 0
+    probability: float = 0.0
+    probability_real: Optional[float] = None
 
-    # Pipeline
-    stage: str                         # nom du stage dans le CRM source
-    stage_order: int = 0               # position ordinale du stage (0, 1, 2...)
-    probability: float = 0.0           # probabilité déclarée dans le CRM (0-1)
-    probability_real: Optional[float] = None  # calculée par Kuria
-
-    # Statut
     status: DealStatus = DealStatus.ACTIVE
 
-    # Dates critiques
     created_at: datetime = field(default_factory=datetime.utcnow)
     last_activity_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     expected_close_date: Optional[datetime] = None
 
-    # Ownership
     owner_id: str = ""
     owner_name: str = ""
-
-    # Acquisition
-    source: str = ""                   # canal d'acquisition (pour CAC)
-
-    # Méta
-    connector_source: str = ""         # "hubspot", "salesforce", "pipedrive"
-    raw_id: str = ""                   # l'id dans le système source
+    source: str = ""
 
 
 @dataclass
 class Contact:
-    # Identité
+    # Obligatoires
     id: str
     company_id: str
+    connector_source: str
+    raw_id: str
 
-    # Données personnelles
     email: str
+
+    # Optionnels / defaults
     first_name: str = ""
     last_name: str = ""
 
-    # Entreprise
     company_name: str = ""
-    company_size: Optional[int] = None     # nombre d'employés
+    company_size: Optional[int] = None
     company_revenue: Optional[float] = None
     sector: str = ""
 
-    # Acquisition
-    source: str = ""                       # premier canal de contact
-    source_detail: str = ""                # ex: "LinkedIn - campagne mars 2025"
+    source: str = ""
+    source_detail: str = ""
 
-    # Scoring
-    score: Optional[int] = None            # 0-100, calculé par Kuria
+    score: Optional[int] = None
     score_label: Optional[LeadScore] = None
-    score_reason: str = ""                 # explication LLM
+    score_reason: str = ""
 
-    # Dates
     created_at: datetime = field(default_factory=datetime.utcnow)
     last_activity_at: Optional[datetime] = None
-
-    # Méta
-    connector_source: str = ""
-    raw_id: str = ""
 
 
 @dataclass
 class Invoice:
-    # Identité
+    # Obligatoires
     id: str
     company_id: str
+    connector_source: str
+    raw_id: str
 
-    # Montant
     amount: float
+
+    # Optionnels / defaults
     amount_paid: float = 0.0
     currency: str = "EUR"
 
-    # Client
     client_id: str = ""
     client_name: str = ""
 
-    # Statut
     status: InvoiceStatus = InvoiceStatus.SENT
 
-    # Dates critiques
     issued_at: datetime = field(default_factory=datetime.utcnow)
     due_at: Optional[datetime] = None
     paid_at: Optional[datetime] = None
-
-    # Paiement réel vs contractuel
     payment_delay_days: Optional[int] = None
-    # = (paid_at - due_at).days si paid_at existe
-    # positif = en retard, négatif = en avance
-
-    # Méta
-    connector_source: str = ""
-    raw_id: str = ""
 
 
 @dataclass
 class Task:
-    # Identité
+    # Obligatoires
     id: str
     company_id: str
+    connector_source: str
+    raw_id: str
 
-    # Contenu
     title: str
+
+    # Optionnels / defaults
     description: str = ""
 
-    # Assignation
     assignee_id: str = ""
     assignee_name: str = ""
 
-    # Statut
     status: TaskStatus = TaskStatus.TODO
 
-    # Dates
     created_at: datetime = field(default_factory=datetime.utcnow)
     due_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
-    # Cycle time
     cycle_time_days: Optional[float] = None
-    # = (completed_at - created_at).days si completed_at existe
-
-    # Méta
-    connector_source: str = ""         # "asana", "notion", "trello"
-    raw_id: str = ""
 
 
 @dataclass
 class Expense:
-    # Identité
+    # Obligatoires
     id: str
     company_id: str
+    connector_source: str
+    raw_id: str
 
-    # Montant
     amount: float
+
+    # Optionnels / defaults
     currency: str = "EUR"
 
-    # Catégorie
     vendor: str = ""
-    category: str = ""                 # classification brute du connecteur
+    category: str = ""
     is_recurring: bool = False
 
-    # Date
     date: datetime = field(default_factory=datetime.utcnow)
-
-    # Méta
-    connector_source: str = ""
-    raw_id: str = ""
