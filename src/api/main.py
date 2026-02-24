@@ -84,3 +84,18 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"error": "Erreur interne", "detail": str(exc)}
 )
+
+
+# api/main.py — déjà prévu, juste compléter
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8501",
+        "https://ton-app.lovable.app",    # ← ajouter
+        os.environ.get("DASHBOARD_URL", "")
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+                                       )
