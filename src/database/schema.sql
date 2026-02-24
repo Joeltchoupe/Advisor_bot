@@ -391,3 +391,16 @@ create table credentials (
     credentials jsonb not null,
     unique (company_id, tool)
 );
+
+-- database/schema.sql
+
+create table adapter_adjustments (
+    id          uuid primary key default uuid_generate_v4(),
+    company_id  uuid not null references companies(id),
+    agent_name  text not null,
+    parameter   text not null,
+    new_value   text not null,
+    reason      text default '',
+    applied_at  timestamptz default now(),
+    applied_by  text default 'consultant'
+);
