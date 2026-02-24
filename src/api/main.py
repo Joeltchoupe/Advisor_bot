@@ -4,23 +4,22 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.routes import scan, agents, dashboard, webhooks
 
+# Charge .env en local uniquement (en prod Railway injecte les vars)
+load_dotenv()
+
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s : %(message)s"
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(name)s : %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("kuria.api")
 
-
-# ─────────────────────────────────────────
-# LIFESPAN
-# Code qui tourne au démarrage et à l'arrêt
-# ─────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,94 +28,69 @@ async def lifespan(app: FastAPI):
     logger.info("Kuria API — Arrêt")
 
 
-# ─────────────────────────────────────────
-# APP
-# ─────────────────────────────────────────
-
 app = FastAPI(
     title="Kuria API",
     version="1.0.0",
-    description="API interne de Kuria — clarté d'abord",
-    lifespan=lifespan
+    description="API Kuria — clarté d'abord",
+    lifespan=lifespan,
 )
 
-# CORS : Streamlit sur un autre port en local
+# ─────────────────────────────────────────
+# CORS
+# ─────────────────────────────────────────
+# Recommandation V1:
+# FRONTEND_ORIGINS="https://kuria.lovable.app,https://kuria.vercel.app"
+frontend_origins = os.getenv("FRONTEND_ORIGINS", "")
+origins = [
+    "http://localhost:3000",   # React local
+    "http://localhost:8501",   # Streamlit local (si tu l'utilises encore)
+]
+
+if frontend_origins:
+    origins.extend([o.strip() for o in frontend_origins.split(",") if o.strip()])
+
+# Ancien nom si tu avais déjà DASHBOARD_URL
+dashboard_url = os.getenv("DASHBOARD_URL", "").strip()
+if dashboard_url:
+    origins.append(dashboard_url)
+
+# Dédoublonner
+origins = sorted(set(origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8501",         # Streamlit local
-        os.environ.get("DASHBOARD_URL", ""),
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"],  # inclut X-API-KEY
 )
-
 
 # ─────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────
-
 app.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
-app.include_router(agents.router,   prefix="/agents",   tags=["agents"])
-app.include_router(dashboard.router,prefix="/dashboard",tags=["dashboard"])
-app.include_router(scan.router,     prefix="/scan",     tags=["scan"])
-
+app.include_router(agents.router, prefix="/agents", tags=["agents"])
+app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
+app.include_router(scan.router, prefix="/scan", tags=["scan"])
 
 # ─────────────────────────────────────────
-# HEALTH CHECK
-# Railway et Railway healthcheck
+# HEALTH
 # ─────────────────────────────────────────
+@app.get("/")
+def root() -> dict:
+    return {"status": "ok", "service": "kuria-api"}
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "kuria-api"}
 
-
 # ─────────────────────────────────────────
-# GESTION D'ERREURS GLOBALE
+# ERREURS GLOBALES
 # ─────────────────────────────────────────
-
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Erreur non gérée : {exc} — {request.url}")
+    logger.exception(f"Erreur non gérée — {request.method} {request.url}: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"error": "Erreur interne", "detail": str(exc)}
+        content={"error": "Erreur interne", "detail": str(exc)},
 )
-
-
-# api/main.py — déjà prévu, juste compléter
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8501",
-        "https://ton-app.lovable.app",    # ← ajouter
-        os.environ.get("DASHBOARD_URL", "")
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-                                       )
-
-# À ajouter dans api/main.py
-
-from fastapi import Header, HTTPException
-
-async def verify_token(x_api_key: str = Header(...)):
-    """
-    Middleware d'auth minimaliste pour la V1.
-    Chaque client a une clé dans Supabase.
-    """
-    from services.database import get_client
-    client = get_client()
-
-    result = client.table("companies").select(
-        "id"
-    ).eq("api_key", x_api_key).limit(1).execute()
-
-    if not result.data:
-        raise HTTPException(status_code=401, detail="Non autorisé")
-
-    return result.data[0]["id"]
